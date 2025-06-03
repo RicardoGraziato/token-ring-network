@@ -18,12 +18,24 @@ class Node:
     def load_config(self, filename):
         with open(filename) as f:
             lines = [line.strip() for line in f.readlines()]
-            ip_port = lines[0].split(":")
-            self.right_ip, self.right_port = ip_port[0], int(ip_port[1])
-            self.nickname = lines[1]
-            self.token_time = int(lines[2])
-            self.is_token_gen = lines[3].lower() == "true"
-            self.port = int(ip_port[1])  # listen on same port
+
+        ip_port = lines[0].split(":")
+        self.right_ip, self.right_port = ip_port[0], int(ip_port[1])
+        self.nickname = lines[1]
+        self.token_time = int(lines[2])
+        self.is_token_gen = lines[3].lower() == "true"
+
+        # Define a porta local com base no apelido
+        apelido_para_porta = {
+            "Bob": 6001,
+            "Cristina": 6002,
+            "Ricardo": 6003,
+        }
+
+        if self.nickname not in apelido_para_porta:
+            raise ValueError(f"Apelido '{self.nickname}' não está mapeado para nenhuma porta.")
+
+        self.port = apelido_para_porta[self.nickname]
 
     def run(self):
         if self.is_token_gen:
