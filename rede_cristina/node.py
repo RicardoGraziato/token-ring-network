@@ -38,14 +38,21 @@ class Node:
 
     def run(self):
         if self.is_token_gen:
-            self.send_token()
+            threading.Thread(target=self.send_token).start()
         threading.Thread(target=self.receive).start()
 
         while True:
             msg = input("Digite uma mensagem (apelido destino:mensagem): ")
             if msg:
                 parts = msg.split(":", 1)
-                self.queue.add_message(parts[1], parts[0])  # mensagem, destino
+                self.queue.add_message(parts[1], parts[0])
+                if(self.ownToken):
+                    msg, dest = self.queue.get_message()
+                    crc = compute_crc32(msg)
+                    packet = create_data_packet("naoexiste", self.nickname, dest, crc, msg)
+                    packet = maybe_corrupt(packet)
+                    self.sock.sendto(packet.encode(), (self.right_ip, self.right_port))
+                    
 
     def receive(self):
         while True:
@@ -60,9 +67,10 @@ class Node:
         time.sleep(self.token_time)
         self.sock.sendto("9000".encode(), (self.right_ip, self.right_port))
         self.ownToken = False
-        print("Token send to: " + str(self.right_ip) + str(self.right_port))
+        print("Token send to: " + str(self.right_ip) + ":" + str(self.right_port))
 
     def handle_token(self):
+        print("Token received")
         self.ownToken = True
         if not self.queue.is_empty():
             msg, dest = self.queue.get_message()
@@ -91,6 +99,4 @@ class Node:
                 self.queue.requeue_message()
             self.send_token()
         else:
-            print("Encaminhando mensagem ")
-            time.sleep(3)
             self.sock.sendto(packet_str.encode(), (self.right_ip, self.right_port))
