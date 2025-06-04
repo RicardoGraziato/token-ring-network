@@ -13,7 +13,10 @@ class Node:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(('', self.port))
         self.queue = MessageQueue()
-        self.ownToken = self.is_token_gen
+        self.own_token = self.is_token_gen
+        self.awaiting_ack = False
+        self.token_delay_event = threading.Event()
+        self.token_delay_thread = None
 
     def load_config(self, filename):
         with open(filename) as f:
@@ -25,7 +28,6 @@ class Node:
         self.token_time = int(lines[2])
         self.is_token_gen = lines[3].lower() == "true"
 
-        # Define a porta local com base no apelido
         apelido_para_porta = {
             "Bob": 6001,
             "Cristina": 6002,
@@ -34,80 +36,92 @@ class Node:
 
         if self.nickname not in apelido_para_porta:
             raise ValueError(f"Apelido '{self.nickname}' não está mapeado para nenhuma porta.")
-
         self.port = apelido_para_porta[self.nickname]
 
     def run(self):
+        threading.Thread(target=self.receive, daemon=True).start()
+
         if self.is_token_gen:
-            threading.Thread(target=self.inital_send_token).start()
-        threading.Thread(target=self.receive).start()
+            print(f"{self.nickname} é o gerador do token. Inicializando...")
+            time.sleep(2)
+            self.send_token()
 
         while True:
-            msg = input("Digite uma mensagem (apelido destino:mensagem): ")
+            msg = input("Digite uma mensagem (destino:mensagem): ")
             if msg:
-                parts = msg.split(":", 1)
-                self.queue.add_message(parts[1], parts[0])
-                if(self.ownToken):
-                    msg, dest = self.queue.get_message()
-                    crc = compute_crc32(msg)
-                    packet = create_data_packet("naoexiste", self.nickname, dest, crc, msg)
-                    packet = maybe_corrupt(packet)
-                    self.sock.sendto(packet.encode(), (self.right_ip, self.right_port))
-                    
+                try:
+                    dest, text = msg.split(":", 1)
+                    self.queue.add_message(text.strip(), dest.strip())
+
+                    if self.own_token and not self.awaiting_ack:
+                        self.token_delay_event.set()
+                        if self.token_delay_thread and self.token_delay_thread.is_alive():
+                            self.token_delay_thread.join()
+                        self.handle_token()
+                except ValueError:
+                    print("Formato inválido. Use: destino:mensagem")
 
     def receive(self):
         while True:
             data, _ = self.sock.recvfrom(1024)
             msg = data.decode()
-            if msg == "9000":  # Token
+
+            if msg == "9000":
                 self.handle_token()
             elif msg.startswith("7777:"):
                 self.handle_data_packet(msg)
 
-    def inital_send_token(self):
-        time.sleep(self.token_time)
-        if(self.ownToken):
-            self.sock.sendto("9000".encode(), (self.right_ip, self.right_port))
-            self.ownToken = False
-            print(str(datetime.datetime.now()) + "Token send to: " + str(self.right_ip) + ":" + str(self.right_port))
-
-
-    def send_token(self):
-         if(self.ownToken):
-            self.sock.sendto("9000".encode(), (self.right_ip, self.right_port))
-            self.ownToken = False
-            print(str(datetime.datetime.now()) + "Token send to: " + str(self.right_ip) + ":" + str(self.right_port))
-
     def handle_token(self):
-        print(str(datetime.datetime.now()) + "Token received")
-        self.ownToken = True
-        if not self.queue.is_empty():
+        print(f"[{self.nickname}] Token recebido.")
+        self.own_token = True
+
+        if not self.queue.is_empty() and not self.awaiting_ack:
             msg, dest = self.queue.get_message()
             crc = compute_crc32(msg)
-            packet = create_data_packet("naoexiste", self.nickname, dest, crc, msg)
-            packet = maybe_corrupt(packet)
+            msg_to_send = maybe_corrupt(msg)
+            packet = create_data_packet("naoexiste", self.nickname, dest, crc, msg_to_send)
+            print(f"[{self.nickname}] Enviando pacote para {dest}: {msg}")
             self.sock.sendto(packet.encode(), (self.right_ip, self.right_port))
+            self.awaiting_ack = True
         else:
-            threading.Thread(target=self.inital_send_token).start()
+            print(f"[{self.nickname}] Sem mensagens. Esperando até {self.token_time}s.")
+            self.token_delay_event.clear()
+            self.token_delay_thread = threading.Thread(target=self.delayed_token_send)
+            self.token_delay_thread.start()
+
+    def delayed_token_send(self):
+        if not self.token_delay_event.wait(self.token_time):
+            print(f"[{self.nickname}] Tempo expirado. Enviando token.")
+            self.send_token()
 
     def handle_data_packet(self, packet_str):
         ctrl, orig, dest, crc, msg = parse_packet(packet_str)
+
         if dest == self.nickname:
+            print(f"[{self.nickname}] Pacote destinado a mim de {orig}. Verificando integridade...")
             if verify_crc32(msg, crc):
-                print(f"{str(datetime.datetime.now())}: Mensagem de {orig}: {msg}")
+                print(f"[{self.nickname}] Mensagem recebida com sucesso: '{msg}'")
                 ctrl = "ACK"
             else:
+                print(f"[{self.nickname}] Erro na mensagem recebida.")
                 ctrl = "NACK"
-            new_packet = create_data_packet(ctrl, orig, dest, crc, msg)
-            print("Enviando pacote: " + str(new_packet))
-            self.sock.sendto(new_packet.encode(), (self.right_ip, self.right_port))
+            response = create_data_packet(ctrl, orig, dest, crc, msg)
+            self.sock.sendto(response.encode(), (self.right_ip, self.right_port))
+
         elif orig == self.nickname:
-            print(f"{str(datetime.datetime.now())}Mensagem retornou com {ctrl}")
+            print(f"[{self.nickname}] Resposta da minha mensagem: {ctrl}")
             if ctrl == "ACK" or ctrl == "naoexiste":
                 self.queue.confirm_delivery()
+                self.awaiting_ack = False
             elif ctrl == "NACK":
                 self.queue.requeue_message()
+                self.awaiting_ack = False
             self.send_token()
+
         else:
-            print("Enviando pacote: " + str(packet_str))
             self.sock.sendto(packet_str.encode(), (self.right_ip, self.right_port))
+
+    def send_token(self):
+        print(f"[{self.nickname}] Enviando token para próximo nó.")
+        self.sock.sendto("9000".encode(), (self.right_ip, self.right_port))
+        self.own_token = False
