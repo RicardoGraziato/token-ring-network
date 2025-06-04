@@ -97,7 +97,19 @@ class Node:
     def handle_data_packet(self, packet_str):
         ctrl, orig, dest, crc, msg = parse_packet(packet_str)
 
-        if dest == self.nickname:
+        if orig == self.nickname:
+            # A mensagem voltou para mim, sou o remetente original
+            print(f"[{self.nickname}] Resposta da minha mensagem: {ctrl}")
+            if ctrl == "ACK" or ctrl == "naoexiste":
+                self.queue.confirm_delivery()
+                self.awaiting_ack = False
+            elif ctrl == "NACK":
+                self.queue.requeue_message()
+                self.awaiting_ack = False
+            self.send_token()
+
+        elif dest == self.nickname:
+            # Sou o destinatário da mensagem
             print(f"[{self.nickname}] Pacote destinado a mim de {orig}. Verificando integridade...")
             if verify_crc32(msg, crc):
                 print(f"[{self.nickname}] Mensagem recebida com sucesso: '{msg}'")
@@ -108,18 +120,10 @@ class Node:
             response = create_data_packet(ctrl, orig, dest, crc, msg)
             self.sock.sendto(response.encode(), (self.right_ip, self.right_port))
 
-        elif orig == self.nickname:
-            print(f"[{self.nickname}] Resposta da minha mensagem: {ctrl}")
-            if ctrl == "ACK" or ctrl == "naoexiste":
-                self.queue.confirm_delivery()
-                self.awaiting_ack = False
-            elif ctrl == "NACK":
-                self.queue.requeue_message()
-                self.awaiting_ack = False
-            self.send_token()
-
         else:
+            # Encaminha para o próximo
             self.sock.sendto(packet_str.encode(), (self.right_ip, self.right_port))
+
 
     def send_token(self):
         print(f"[{self.nickname}] Enviando token para próximo nó.")
