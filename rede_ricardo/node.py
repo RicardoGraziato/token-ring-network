@@ -1,6 +1,7 @@
 import socket
 import threading
 import time
+import random
 from message_queue import MessageQueue
 from crc_utils import compute_crc32, verify_crc32
 from packet_utils import create_data_packet, parse_packet
@@ -8,7 +9,7 @@ from error_injector import maybe_corrupt
 import datetime
 
 class Node:
-    def __init__(self, config_file):
+    def __init__(self, config_file, hosts):
         self.load_config(config_file)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(('', self.port))
@@ -17,6 +18,12 @@ class Node:
         self.awaiting_ack = False
         self.token_delay_event = threading.Event()
         self.token_delay_thread = None
+        self.last_token_time = 0
+        self.hosts = hosts
+        if self.is_token_gen:
+            self.token_check_thread = threading.Thread(target=self.monitor_token)
+            self.token_check_thread.daemon = True
+            self.token_check_thread.start()
 
     def load_config(self, filename):
         with open(filename) as f:
@@ -38,6 +45,14 @@ class Node:
             raise ValueError(f"Apelido '{self.nickname}' não está mapeado para nenhuma porta.")
         self.port = apelido_para_porta[self.nickname]
 
+    def monitor_token(self):
+        while True:
+            time.sleep(self.token_time * self.hosts)  # Aguarda 3x o tempo esperado
+            elapsed = time.time() - self.last_token_time
+            if elapsed > self.token_time * self.hosts and self.is_token_gen:
+                print(f"[{self.nickname}] Token parece perdido. Gerando novo token.")
+                self.send_token()
+
     def run(self):
         threading.Thread(target=self.receive, daemon=True).start()
 
@@ -57,7 +72,7 @@ class Node:
                         self.token_delay_event.set()
                         if self.token_delay_thread and self.token_delay_thread.is_alive():
                             self.token_delay_thread.join()
-                        self.handle_token()
+                        self.handle_token(True)
                 except ValueError:
                     print("Formato inválido. Use: destino:mensagem")
 
@@ -67,12 +82,21 @@ class Node:
             msg = data.decode()
 
             if msg == "9000":
-                self.handle_token()
+                if self.own_token and self.is_token_gen:
+                    print(f"[{self.nickname}] ERRO: Recebi um token enquanto ainda estava com outro! Token duplicado detectado.")
+                    # (opcional) descarta ou registra
+                    continue
+                if random.random() < 0.1:
+                    print(f"[{self.nickname}] Token descartado aleatoriamente para simular falha.")
+                    continue
+                self.handle_token(False)
             elif msg.startswith("7777:"):
                 self.handle_data_packet(msg)
 
-    def handle_token(self):
-        print(f"[{self.nickname}] Token recebido.")
+    def handle_token(self, msgSent):
+        if(not msgSent):
+            self.last_token_time = time.time()
+            print(f"[{self.nickname}] Token recebido.")
         self.own_token = True
 
         if not self.queue.is_empty() and not self.awaiting_ack:
@@ -126,6 +150,10 @@ class Node:
 
 
     def send_token(self):
+        if random.random() < 0.05:
+            print(f"[{self.nickname}] Duplicando token para teste.")
+            self.sock.sendto("9000".encode(), (self.right_ip, self.right_port))
+            time.sleep(0.1)
         print(f"[{self.nickname}] Enviando token para próximo nó.")
         self.sock.sendto("9000".encode(), (self.right_ip, self.right_port))
         self.own_token = False
